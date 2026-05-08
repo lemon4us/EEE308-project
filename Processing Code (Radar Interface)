@@ -1,0 +1,203 @@
+import processing.serial.*;
+
+// ================= SERIAL VARIABLES =================
+Serial myPort;
+
+String data = "";
+int iAngle = 0;
+int iDistance = 0;
+String motorStatus = "OFF STOP";
+
+// Maximum radar distance in cm
+int maxDistance = 200;
+
+// ================= SETUP =================
+
+void setup() {
+  size(1200, 700);
+  smooth();
+
+  // Show available COM ports in the console
+  printArray(Serial.list());
+
+  // غيّر COM10 إذا كان منفذ الأردوينو مختلفًا عندك
+  String portName = "COM10";
+
+  myPort = new Serial(this, portName, 9600);
+  myPort.bufferUntil('\n');
+}
+
+// ================= DRAW LOOP =================
+
+void draw() {
+  // Background fade effect
+  fill(0, 50);
+  noStroke();
+  rect(0, 0, width, height - 50);
+
+  drawRadar();
+  drawScanLine();
+  drawObjectDot();
+  drawInfoText();
+}
+
+// ================= READ SERIAL DATA =================
+
+void serialEvent(Serial myPort) {
+  data = myPort.readStringUntil('\n');
+
+  if (data != null) {
+    data = data.trim();
+
+    // Expected Arduino output:
+    // Motor: ON WORK  Angle: 45  Distance: 12 cm
+    String[] values = match(data, "Motor:\\s*(.*?)\\s*Angle:\\s*(\\d+)\\s*Distance:\\s*(\\d+)");
+
+    if (values != null && values.length == 4) {
+      motorStatus = values[1];
+
+      int rawAngle = int(values[2]);
+
+      // Keep angle between 0 and 180
+      if (rawAngle < 0) {
+        rawAngle = 0;
+      }
+
+      if (rawAngle > 180) {
+        rawAngle = 180;
+      }
+
+      iAngle = rawAngle;
+      iDistance = int(values[3]);
+    }
+  }
+}
+
+// ================= DRAW RADAR BACKGROUND =================
+
+void drawRadar() {
+  pushMatrix();
+
+  // Radar origin at bottom center
+  translate(width / 2, height - 50);
+
+  noFill();
+  strokeWeight(2);
+  stroke(98, 245, 31);
+
+  // Distance arcs - 180 degrees
+  arc(0, 0, width, width, PI, TWO_PI);
+  arc(0, 0, width * 0.75, width * 0.75, PI, TWO_PI);
+  arc(0, 0, width * 0.50, width * 0.50, PI, TWO_PI);
+  arc(0, 0, width * 0.25, width * 0.25, PI, TWO_PI);
+
+  // Base line
+  line(-width / 2, 0, width / 2, 0);
+
+  // Angle lines every 30 degrees
+  for (int angle = 0; angle <= 180; angle += 30) {
+    float x = (width / 2.0) * cos(radians(angle));
+    float y = -(width / 2.0) * sin(radians(angle));
+    line(0, 0, x, y);
+  }
+
+  popMatrix();
+}
+
+// ================= DRAW SCAN LINE =================
+
+void drawScanLine() {
+  pushMatrix();
+
+  translate(width / 2, height - 50);
+
+  if (motorStatus.contains("ON WORK")) {
+    strokeWeight(4);
+    stroke(30, 250, 60);
+
+    float x = (width / 2.0) * cos(radians(iAngle));
+    float y = -(width / 2.0) * sin(radians(iAngle));
+
+    line(0, 0, x, y);
+  }
+
+  popMatrix();
+}
+
+// ================= DRAW OBJECT AS DOT =================
+
+void drawObjectDot() {
+  pushMatrix();
+
+  translate(width / 2, height - 50);
+
+  // Draw object only if motor is ON and distance is inside range
+  if (motorStatus.contains("ON WORK") && iDistance < maxDistance) {
+
+    // Convert distance from cm to pixels
+    float pixelDistance = iDistance * (width / 2.0) / maxDistance;
+
+    // Calculate object position
+    float x = pixelDistance * cos(radians(iAngle));
+    float y = -pixelDistance * sin(radians(iAngle));
+
+    noStroke();
+
+    // Dot color based on distance
+    if (iDistance <= 20) {
+      fill(255, 0, 0);       // Red = danger
+    } 
+    else if (iDistance > 20 && iDistance <= 50) {
+      fill(255, 255, 0);     // Yellow = near
+    } 
+    else {
+      fill(0, 255, 0);       // Green = safe
+    }
+
+    // Main object dot
+    ellipse(x, y, 22, 22);
+
+    // Red glow when object is too close
+    if (iDistance <= 20) {
+      fill(255, 0, 0, 70);
+      ellipse(x, y, 45, 45);
+    }
+  }
+
+  popMatrix();
+}
+
+// ================= DRAW TEXT INFORMATION =================
+
+void drawInfoText() {
+  pushMatrix();
+
+  // Bottom black bar
+  fill(0);
+  noStroke();
+  rect(0, height - 50, width, 50);
+
+  // Main text
+  fill(98, 245, 31);
+  textSize(25);
+
+  text("Status: " + motorStatus, 50, height - 15);
+  text("Angle: " + iAngle + " deg", 400, height - 15);
+
+  if (iDistance < maxDistance) {
+    text("Distance: " + iDistance + " cm", 750, height - 15);
+  } else {
+    text("Distance: Out of Range", 750, height - 15);
+  }
+
+  // Distance labels
+  textSize(15);
+  fill(98, 245, 31, 150);
+
+  text("50cm", width / 2 + width * 0.125, height - 60);
+  text("100cm", width / 2 + width * 0.25, height - 60);
+  text("150cm", width / 2 + width * 0.375, height - 60);
+  text("200cm", width / 2 + width * 0.5 - 50, height - 60);
+
+  popMatrix();
+}
