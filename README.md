@@ -76,7 +76,8 @@ Software Tools:
 Submitted By:
 
 •	Name: Ahmed alrayah
-•	Student Number: 210202983
+•	Student Number: 210202983 
+https://github.com/lemon4us/EEE308-project
 
 •	Name: Yousef Rafat
 •	Student Number: 210202998
