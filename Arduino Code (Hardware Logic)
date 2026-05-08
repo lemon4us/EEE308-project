@@ -1,0 +1,443 @@
+#include <Wire.h>
+#include <Servo.h>
+
+// ================= LCD SETTINGS =================
+#define LCD_ADDR 0x27
+#define LCD_BACKLIGHT 0x08
+#define LCD_ENABLE 0x04
+#define LCD_RS 0x01
+
+// ================= PINS =================
+const int greenLED = 13;
+const int yellowLED = 12;
+const int redLED = 8;
+
+const int buzzer = 7;
+
+const int trigPin = 9;
+const int echoPin = 10;
+
+const int servoPin = 6;
+Servo radarServo;
+
+const int buttonPin = 2;
+
+// ================= SERVO 360 SETTINGS =================
+// 90 = Stop
+// More than 90 = rotate right
+// Less than 90 = rotate left
+
+int servoStop = 90;
+
+// Medium speed
+// If still fast, use 97 and 83
+int servoRight = 100;
+int servoLeft = 80;
+
+// Time for 180 degrees movement
+// If servo rotates more than 180 degrees, decrease this value
+// If servo rotates less than 180 degrees, increase this value
+unsigned long halfTurnTime = 1400;
+
+// Stop time between right and left turns
+unsigned long stopBetweenTurns = 700;
+
+// Servo movement phases
+int servoPhase = 0;
+// 0 = stop before right
+// 1 = rotate right 180 degrees
+// 2 = stop before left
+// 3 = rotate left 180 degrees
+
+unsigned long phaseStartTime = 0;
+
+// Fake angle for Processing display: 0 to 180
+int scanAngle = 0;
+
+// ================= MOTOR STATUS =================
+bool motorEnabled = false;
+
+// ================= BUTTON VARIABLES =================
+bool lastButtonReading = HIGH;
+bool buttonState = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;
+
+// ================= DISTANCE VARIABLES =================
+long duration;
+int distance;
+
+// ================= BUZZER VARIABLES =================
+unsigned long lastBuzzerTime = 0;
+bool buzzerState = false;
+
+// ================= LCD VARIABLES =================
+unsigned long lastLCDUpdate = 0;
+const int lcdInterval = 250;
+
+// ================= LCD FUNCTIONS =================
+
+void lcdWrite4Bits(byte data) {
+  Wire.beginTransmission(LCD_ADDR);
+  Wire.write(data | LCD_BACKLIGHT);
+  Wire.endTransmission();
+
+  Wire.beginTransmission(LCD_ADDR);
+  Wire.write(data | LCD_ENABLE | LCD_BACKLIGHT);
+  Wire.endTransmission();
+
+  delayMicroseconds(1);
+
+  Wire.beginTransmission(LCD_ADDR);
+  Wire.write((data & ~LCD_ENABLE) | LCD_BACKLIGHT);
+  Wire.endTransmission();
+
+  delayMicroseconds(50);
+}
+
+void lcdSend(byte value, byte mode) {
+  byte highNibble = value & 0xF0;
+  byte lowNibble = (value << 4) & 0xF0;
+
+  lcdWrite4Bits(highNibble | mode);
+  lcdWrite4Bits(lowNibble | mode);
+}
+
+void lcdCommand(byte command) {
+  lcdSend(command, 0);
+}
+
+void lcdData(byte data) {
+  lcdSend(data, LCD_RS);
+}
+
+void lcdClear() {
+  lcdCommand(0x01);
+  delay(2);
+}
+
+void lcdSetCursor(byte col, byte row) {
+  byte rowOffsets[] = {0x00, 0x40};
+  lcdCommand(0x80 | (col + rowOffsets[row]));
+}
+
+void lcdPrint(const char* text) {
+  while (*text) {
+    lcdData(*text++);
+  }
+}
+
+void lcdPrintNumber(int number) {
+  char buffer[10];
+  itoa(number, buffer, 10);
+  lcdPrint(buffer);
+}
+
+void lcdInit() {
+  delay(50);
+
+  lcdWrite4Bits(0x30);
+  delay(5);
+
+  lcdWrite4Bits(0x30);
+  delayMicroseconds(150);
+
+  lcdWrite4Bits(0x30);
+  delayMicroseconds(150);
+
+  lcdWrite4Bits(0x20);
+
+  lcdCommand(0x28);
+  lcdCommand(0x0C);
+  lcdCommand(0x06);
+  lcdClear();
+}
+
+// ================= BUTTON FUNCTION =================
+
+void updateButton() {
+  bool reading = digitalRead(buttonPin);
+
+  if (reading != lastButtonReading) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != buttonState) {
+      buttonState = reading;
+
+      if (buttonState == LOW) {
+        motorEnabled = !motorEnabled;
+
+        if (motorEnabled) {
+          servoPhase = 0;
+          phaseStartTime = millis();
+        } else {
+          radarServo.write(servoStop);
+        }
+      }
+    }
+  }
+
+  lastButtonReading = reading;
+}
+
+// ================= ULTRASONIC FUNCTION =================
+
+int readDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH, 30000);
+
+  if (duration == 0) {
+    return 200;
+  }
+
+  int d = duration * 0.034 / 2;
+
+  if (d <= 0 || d > 200) {
+    d = 200;
+  }
+
+  return d;
+}
+
+// ================= SERVO 360 HALF TURN FUNCTION =================
+
+void updateServoHalfTurn() {
+  unsigned long currentMillis = millis();
+
+  if (!motorEnabled) {
+    radarServo.write(servoStop);
+    return;
+  }
+
+  unsigned long elapsed = currentMillis - phaseStartTime;
+
+  // Stop before right turn
+  if (servoPhase == 0) {
+    radarServo.write(servoStop);
+    scanAngle = 0;
+
+    if (elapsed >= stopBetweenTurns) {
+      servoPhase = 1;
+      phaseStartTime = currentMillis;
+    }
+  }
+
+  // Rotate right 180 degrees
+  else if (servoPhase == 1) {
+    radarServo.write(servoRight);
+
+    elapsed = currentMillis - phaseStartTime;
+    scanAngle = map(elapsed, 0, halfTurnTime, 0, 180);
+
+    if (scanAngle > 180) {
+      scanAngle = 180;
+    }
+
+    if (elapsed >= halfTurnTime) {
+      radarServo.write(servoStop);
+      scanAngle = 180;
+      servoPhase = 2;
+      phaseStartTime = currentMillis;
+    }
+  }
+
+  // Stop before left turn
+  else if (servoPhase == 2) {
+    radarServo.write(servoStop);
+    scanAngle = 180;
+
+    if (elapsed >= stopBetweenTurns) {
+      servoPhase = 3;
+      phaseStartTime = currentMillis;
+    }
+  }
+
+  // Rotate left 180 degrees
+  else if (servoPhase == 3) {
+    radarServo.write(servoLeft);
+
+    elapsed = currentMillis - phaseStartTime;
+    scanAngle = map(elapsed, 0, halfTurnTime, 180, 0);
+
+    if (scanAngle < 0) {
+      scanAngle = 0;
+    }
+
+    if (elapsed >= halfTurnTime) {
+      radarServo.write(servoStop);
+      scanAngle = 0;
+      servoPhase = 0;
+      phaseStartTime = currentMillis;
+    }
+  }
+}
+
+// ================= ALERT SYSTEM =================
+
+void updateAlertSystem(int d) {
+  unsigned long currentMillis = millis();
+
+  // Far distance: green LED, no sound
+  if (d > 50) {
+    digitalWrite(greenLED, HIGH);
+    digitalWrite(yellowLED, LOW);
+    digitalWrite(redLED, LOW);
+
+    noTone(buzzer);
+    digitalWrite(buzzer, LOW);
+  }
+
+  // Medium distance: yellow LED, medium sound
+  else if (d > 20 && d <= 50) {
+    digitalWrite(greenLED, LOW);
+    digitalWrite(yellowLED, HIGH);
+    digitalWrite(redLED, LOW);
+
+    if (currentMillis - lastBuzzerTime >= 400) {
+      lastBuzzerTime = currentMillis;
+      buzzerState = !buzzerState;
+
+      if (buzzerState) {
+        tone(buzzer, 1200);
+      } else {
+        noTone(buzzer);
+        digitalWrite(buzzer, LOW);
+      }
+    }
+  }
+
+  // Close distance: red LED, fast sound
+  else if (d > 10 && d <= 20) {
+    digitalWrite(greenLED, LOW);
+    digitalWrite(yellowLED, LOW);
+    digitalWrite(redLED, HIGH);
+
+    if (currentMillis - lastBuzzerTime >= 120) {
+      lastBuzzerTime = currentMillis;
+      buzzerState = !buzzerState;
+
+      if (buzzerState) {
+        tone(buzzer, 2500);
+      } else {
+        noTone(buzzer);
+        digitalWrite(buzzer, LOW);
+      }
+    }
+  }
+
+  // Very close: red LED, continuous sound
+  else if (d <= 10) {
+    digitalWrite(greenLED, LOW);
+    digitalWrite(yellowLED, LOW);
+    digitalWrite(redLED, HIGH);
+
+    tone(buzzer, 3000);
+  }
+}
+
+// ================= LCD DISPLAY =================
+
+void updateLCD(int a, int d) {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastLCDUpdate >= lcdInterval) {
+    lastLCDUpdate = currentMillis;
+
+    lcdClear();
+
+    lcdSetCursor(0, 0);
+
+    if (motorEnabled) {
+      lcdPrint("ON HALF SCAN");
+    } else {
+      lcdPrint("OFF STOP");
+    }
+
+    lcdSetCursor(0, 1);
+    lcdPrint("A:");
+    lcdPrintNumber(a);
+    lcdPrint(" D:");
+    lcdPrintNumber(d);
+    lcdPrint("cm");
+  }
+}
+
+// ================= SETUP =================
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+  pinMode(greenLED, OUTPUT);
+  pinMode(yellowLED, OUTPUT);
+  pinMode(redLED, OUTPUT);
+
+  pinMode(buzzer, OUTPUT);
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  radarServo.attach(servoPin);
+  radarServo.write(servoStop);
+
+  noTone(buzzer);
+  digitalWrite(buzzer, LOW);
+
+  lcdInit();
+
+  lcdSetCursor(0, 0);
+  lcdPrint("Half Scan Radar");
+  lcdSetCursor(0, 1);
+  lcdPrint("OFF STOP");
+  delay(2000);
+  lcdClear();
+
+  phaseStartTime = millis();
+}
+
+// ================= LOOP =================
+
+void loop() {
+  updateButton();
+
+  updateServoHalfTurn();
+
+  distance = readDistance();
+
+  updateAlertSystem(distance);
+
+  updateLCD(scanAngle, distance);
+
+  Serial.print("Motor: ");
+
+  if (motorEnabled) {
+    Serial.print("ON WORK");
+  } else {
+    Serial.print("OFF STOP");
+  }
+
+  Serial.print("  Angle: ");
+  Serial.print(scanAngle);
+
+  Serial.print("  Distance: ");
+  printDistance(distance);
+
+  delay(25);
+}
+
+// ================= SERIAL PRINT HELPER =================
+
+void printDistance(int d) {
+  Serial.print(d);
+  Serial.println(" cm");
+}
